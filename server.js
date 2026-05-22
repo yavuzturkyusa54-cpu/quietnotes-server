@@ -20,39 +20,102 @@ let colorIndex = 0;
 io.on('connection', (socket) => {
     console.log(`[+] Connected: ${socket.id}`);
 
-    socket.on('join_collab', ({ username }) => {
+    // User connects and registers username
+    socket.on('join', ({ username }) => {
         const color = COLORS[colorIndex % COLORS.length];
         colorIndex++;
-        
-        users.set(socket.id, { username, color, status: 'online', roomId: 'global_room' });
-        socket.join('global_room');
-        
-        // Notify others
-        socket.to('global_room').emit('user_joined', { id: socket.id, username, color });
-        
-        // Send existing users to the new user
-        const activeUsers = Array.from(users.entries()).map(([id, data]) => ({ id, ...data }));
-        socket.emit('init_users', activeUsers);
+
+        users.set(socket.id, {
+            id: socket.id,
+            username: username || 'Anonymous',
+            status: 'online',
+            color,
+            roomId: null
+        });
+
+        console.log(`[JOIN] ${username} (${socket.id}) connected to server.`);
     });
 
-    socket.on('sync_content', (data) => {
-        // Broadcast the editor content to everyone else in the room
-        socket.to('global_room').emit('content_updated', {
-            id: socket.id,
-            html: data.html
-        });
+    // User switches to a different note (room)
+    socket.on('join-room', ({ roomId }) => {
+        const user = users.get(socket.id);
+        if (!user) return;
+
+        // Leave old room
+        if (user.roomId) {
+            socket.leave(user.roomId);
+            broadcastPresence(user.roomId);
+        }
+
+        // Join new room
+        const room = roomId || 'default-room';
+        user.roomId = room;
+        socket.join(room);
+        
+        console.log(`[ROOM] ${user.username} joined Room: ${room}`);
+        
+        broadcastPresence(room);
+        
+        // Notify others in the room that someone joined so they can send the current note content
+        socket.to(room).emit('user-joined', { username: user.username });
+    });
+
+    socket.on('typing', () => {
+        const user = users.get(socket.id);
+        if (user && user.roomId) {
+            user.status = 'typing';
+            socket.to(user.roomId).emit('user-typing', {
+                username: user.username,
+                color: user.color
+            });
+
+            clearTimeout(user._typingTimeout);
+            user._typingTimeout = setTimeout(() => {
+                if (users.has(socket.id)) {
+                    user.status = 'online';
+                    broadcastPresence(user.roomId);
+                }
+            }, 2000);
+        }
+    });
+
+    // Content sync within the room
+    socket.on('content-update', (data) => {
+        const user = users.get(socket.id);
+        if (user && user.roomId) {
+            socket.to(user.roomId).emit('content-update', {
+                ...data,
+                username: user.username,
+                userId: socket.id
+            });
+        }
     });
 
     socket.on('disconnect', () => {
         const user = users.get(socket.id);
         if (user) {
             console.log(`[-] Disconnected: ${user.username} (${socket.id})`);
-            io.to('global_room').emit('user_left', { id: socket.id });
+            const room = user.roomId;
             users.delete(socket.id);
+            broadcastPresence(room);
         }
     });
 });
 
+function broadcastPresence(roomId) {
+    const roomUsers = Array.from(users.values())
+        .filter(u => u.roomId === roomId)
+        .map(u => ({
+            id: u.id,
+            username: u.username,
+            status: u.status,
+            color: u.color
+        }));
+    io.to(roomId).emit('presence', { users: roomUsers, count: roomUsers.length });
+}
+
 server.listen(PORT, () => {
-    console.log(`[!] Server listening on port ${PORT}`);
+    console.log(`\n  ✦ Quiet Notes Collab Server`);
+    console.log(`  ✦ Port: ${PORT}`);
+    console.log(`  ✦ URL:  http://localhost:${PORT}\n`);
 });
