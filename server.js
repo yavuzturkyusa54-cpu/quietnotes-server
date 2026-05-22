@@ -1,8 +1,7 @@
 const http = require('http');
 const { Server } = require('socket.io');
 
-const PORT = process.env.PORT || 8080;
-
+const PORT = process.env.PORT || 3333;
 const server = http.createServer((req, res) => {
     res.writeHead(200, { 'Content-Type': 'text/plain' });
     res.end('Quiet Notes Collab Server is running.');
@@ -12,13 +11,15 @@ const io = new Server(server, {
     cors: { origin: '*', methods: ['GET', 'POST'] }
 });
 
+// Connected users: Map<socketId, { username, status, color, roomId }>
 const users = new Map();
+
 const COLORS = ['#e8a87c', '#85dcb8', '#6c82dc', '#e06c75', '#d19a66', '#56b6c2', '#c678dd', '#98c379'];
 let colorIndex = 0;
 
 io.on('connection', (socket) => {
     console.log(`[+] Connected: ${socket.id}`);
-    
+
     socket.on('join_collab', ({ username }) => {
         const color = COLORS[colorIndex % COLORS.length];
         colorIndex++;
@@ -26,13 +27,16 @@ io.on('connection', (socket) => {
         users.set(socket.id, { username, color, status: 'online', roomId: 'global_room' });
         socket.join('global_room');
         
+        // Notify others
         socket.to('global_room').emit('user_joined', { id: socket.id, username, color });
         
+        // Send existing users to the new user
         const activeUsers = Array.from(users.entries()).map(([id, data]) => ({ id, ...data }));
         socket.emit('init_users', activeUsers);
     });
 
     socket.on('sync_content', (data) => {
+        // Broadcast the editor content to everyone else in the room
         socket.to('global_room').emit('content_updated', {
             id: socket.id,
             html: data.html
